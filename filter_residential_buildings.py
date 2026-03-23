@@ -24,6 +24,12 @@ Sources:
 Usage:
   python filter_residential_buildings.py [--output OUTPUT_DIR] [--chunk-size N]
 
+  On Windows, if 'python' is not on PATH use the full installer path:
+  "C:\Users\HP z440\AppData\Local\Programs\Python\Python312\python.exe" filter_residential_buildings.py [--output OUTPUT_DIR] [--chunk-size N]
+
+  Install dependencies first (same full path):
+  "C:\Users\HP z440\AppData\Local\Programs\Python\Python312\python.exe" -m pip install geopandas pandas requests fiona pyproj shapely
+
 Output:
   <output_dir>/il_residential_buildings_cmap.shp  (and companion files)
 """
