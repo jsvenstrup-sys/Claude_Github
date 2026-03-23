@@ -71,11 +71,14 @@ WORK_CRS = "EPSG:3435"
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _get(url: str, params: dict, retries: int = 4, timeout: int = 180) -> dict:
-    """GET with exponential-backoff retry and basic error handling."""
+def _request(url: str, params: dict, retries: int = 4, timeout: int = 180) -> dict:
+    """POST with exponential-backoff retry and basic error handling.
+
+    Using POST avoids URL-length limits when objectIds lists are large.
+    """
     for attempt in range(retries):
         try:
-            r = requests.get(url, params=params, timeout=timeout)
+            r = requests.post(url, data=params, timeout=timeout)
             r.raise_for_status()
             data = r.json()
             if isinstance(data, dict) and "error" in data:
@@ -87,6 +90,11 @@ def _get(url: str, params: dict, retries: int = 4, timeout: int = 180) -> dict:
             wait = 2 ** attempt
             print(f"    [retry {attempt + 1}/{retries - 1}] {exc}  – waiting {wait}s …")
             time.sleep(wait)
+
+
+def _get(url: str, params: dict, retries: int = 4, timeout: int = 180) -> dict:
+    """GET wrapper kept for metadata/count calls that are safe as GET."""
+    return _request(url, params, retries=retries, timeout=timeout)
 
 
 def layer_meta(base_url: str) -> dict:
@@ -183,7 +191,7 @@ def fetch_all_features(
             "objectIds": ",".join(str(o) for o in batch_oids),
             "where": "1=1",
         }
-        data = _get(base_url + "/query", batch_params, timeout=300)
+        data = _request(base_url + "/query", batch_params, timeout=300)
         features = data.get("features", [])
         if features:
             chunk = gpd.GeoDataFrame.from_features(features, crs=f"EPSG:{out_sr}")
