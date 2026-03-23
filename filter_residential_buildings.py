@@ -180,10 +180,9 @@ def fetch_all_features(
         )
         batch_params = {
             **base_params,
-            "where": f"{oid_field} >= {oid_min} AND {oid_field} <= {oid_max}",
-            "returnGeometry": "true",
+            "objectIds": ",".join(str(o) for o in batch_oids),
+            "where": "1=1",
         }
-        # Remove any previous geometry filter from where-only requests
         data = _get(base_url + "/query", batch_params, timeout=300)
         features = data.get("features", [])
         if features:
@@ -252,7 +251,7 @@ def main() -> None:
     cmap_gdf = fetch_all_features(
         cmap_base,
         where=cmap_where,
-        out_fields=f"{landuse_field},LANDUSE2,Shape_Area",
+        out_fields="*",
         out_sr=4326,
         page_size=args.chunk_size,
     )
