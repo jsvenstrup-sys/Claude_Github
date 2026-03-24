@@ -215,8 +215,9 @@ def load_study_area() -> gpd.GeoDataFrame:
     county_shp = first_file(county_dir, ".shp")
 
     if county_shp is None:
-        url = ("https://www2.census.gov/geo/tiger/TIGER2023/COUNTY/"
-               "tl_2023_17_county.zip")
+        # Census TIGER county files are national (all states in one zip).
+        url = ("https://www2.census.gov/geo/tiger/TIGER2024/COUNTY/"
+               "tl_2024_us_county.zip")
         download_zip(url, county_dir, "Census TIGER Illinois counties")
         county_shp = first_file(county_dir, ".shp")
         if county_shp is None:
@@ -226,6 +227,10 @@ def load_study_area() -> gpd.GeoDataFrame:
             )
 
     gdf = gpd.read_file(county_shp)
+    # Filter to Illinois (STATEFP "17") first to avoid name collisions
+    # (e.g. "Cook" or "Kane" exist in other states)
+    if "STATEFP" in gdf.columns:
+        gdf = gdf[gdf["STATEFP"] == "17"].copy()
     target_upper = {c.upper() for c in TARGET_COUNTIES}
     gdf = gdf[gdf["NAME"].str.upper().isin(target_upper)].copy()
 
