@@ -3,3 +3,5 @@ fiona>=1.9.0
 pandas>=2.0.0
 pyproj>=3.6.0
 shapely>=2.0.0
+requests>=2.31.0
+numpy>=1.24.0
