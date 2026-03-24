@@ -269,12 +269,26 @@ def load_residential(study_area: gpd.GeoDataFrame) -> gpd.GeoDataFrame | None:
         return None
 
     log(f"  Found {len(shps)} shapefile(s) in {RESIDENTIAL_SHP_DIR}")
+    # Bounding box in WGS84 for fast bbox pre-filter on read
+    study_bbox_wgs = tuple(study_area.to_crs(CRS_WGS84).total_bounds)
     gdfs = []
-    for shp in shps:
-        gdf = gpd.read_file(shp).to_crs(CRS_PROJ)
-        clipped = gpd.clip(gdf, study_area)
-        if not clipped.empty:
-            gdfs.append(clipped)
+    for i, shp in enumerate(shps, 1):
+        log(f"  [{i}/{len(shps)}] {shp.name} …")
+        try:
+            # bbox pre-filter avoids loading features outside study area
+            gdf = gpd.read_file(shp, bbox=study_bbox_wgs).to_crs(CRS_PROJ)
+            if gdf.empty:
+                log(f"    no features in bbox — skip")
+                continue
+            log(f"    {len(gdf)} features in bbox, clipping …")
+            clipped = gpd.clip(gdf, study_area)
+            if not clipped.empty:
+                log(f"    {len(clipped)} features after clip")
+                gdfs.append(clipped)
+            else:
+                log(f"    0 features after clip — skip")
+        except Exception as exc:
+            log(f"    WARNING: {exc} — skip")
 
     if not gdfs:
         log("  SKIP — no residential features intersect the study area")
