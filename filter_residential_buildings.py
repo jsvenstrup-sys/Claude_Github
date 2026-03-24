@@ -16,16 +16,16 @@ CMAP LUI20 residential codes used (field: LANDUSE):
 Coverage: northeastern Illinois 7-county CMAP metro only (where CMAP data exists).
 
 Sources:
-  IL DNR Building Footprints:
-    https://geoservices3.dnr.illinois.gov/arcgis/rest/services/statewide_building_footprints/MapServer/0
+  Microsoft US Building Footprints (Illinois):
+    https://minedbuildings.z5.web.core.windows.net/legacy/usbuildings-v2/Illinois.geojson.zip
   CMAP LUI20 FeatureServer:
     https://services5.arcgis.com/LcMXE3TFhi1BSaCY/arcgis/rest/services/LUI20_geodatabase_v1_CMAP/FeatureServer
 
 Usage:
-  python filter_residential_buildings.py [--output OUTPUT_DIR] [--chunk-size N]
+  python filter_residential_buildings.py [--output OUTPUT_DIR] [--chunk-size N] [--cache-dir DIR]
 
   On Windows, if 'python' is not on PATH use the full installer path:
-  "C:/Users/HP z440/AppData/Local/Programs/Python/Python312/python.exe" filter_residential_buildings.py [--output OUTPUT_DIR] [--chunk-size N]
+  "C:/Users/HP z440/AppData/Local/Programs/Python/Python312/python.exe" filter_residential_buildings.py [--output OUTPUT_DIR]
 
   Install dependencies first (same full path):
   "C:/Users/HP z440/AppData/Local/Programs/Python/Python312/python.exe" -m pip install geopandas pandas requests fiona pyproj shapely
@@ -35,7 +35,6 @@ Output:
 """
 
 import argparse
-import json
 import sys
 import time
 from pathlib import Path
@@ -47,9 +46,10 @@ import requests
 # ---------------------------------------------------------------------------
 # Service endpoints
 # ---------------------------------------------------------------------------
-BLDG_BASE = (
-    "https://geoservices3.dnr.illinois.gov/arcgis/rest/services"
-    "/statewide_building_footprints/MapServer/0"
+# Microsoft US Building Footprints – Illinois state file (hosted on Azure Blob Storage)
+MSFT_IL_URL = (
+    "https://minedbuildings.z5.web.core.windows.net/legacy/usbuildings-v2"
+    "/Illinois.geojson.zip"
 )
 CMAP_SERVER = (
     "https://services5.arcgis.com/LcMXE3TFhi1BSaCY/arcgis/rest/services"
@@ -205,6 +205,43 @@ def fetch_all_features(
     return pd.concat(gdfs, ignore_index=True)
 
 
+def fetch_msft_buildings(
+    bbox: tuple[float, float, float, float],
+    cache_dir: Path,
+) -> gpd.GeoDataFrame:
+    """
+    Download the Microsoft USBuildingFootprints Illinois zip (once) and return
+    buildings clipped to *bbox* = (xmin, ymin, xmax, ymax) in EPSG:4326.
+
+    The ~500 MB zip is cached in *cache_dir* so subsequent runs skip the download.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = cache_dir / "Illinois.geojson.zip"
+
+    if zip_path.exists():
+        print(f"  Using cached file: {zip_path}")
+    else:
+        print(f"  Downloading Microsoft IL building footprints → {zip_path}")
+        print("  (This is a large file; it will be cached for future runs.)")
+        with requests.get(MSFT_IL_URL, stream=True, timeout=600) as r:
+            r.raise_for_status()
+            total_bytes = int(r.headers.get("content-length", 0))
+            downloaded = 0
+            with open(zip_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1 << 20):  # 1 MB chunks
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total_bytes:
+                        pct = downloaded / total_bytes * 100
+                        print(f"    {downloaded / 1e6:.0f} MB / {total_bytes / 1e6:.0f} MB  ({pct:.0f}%)", end="\r", flush=True)
+        print(f"\n  Download complete: {zip_path.stat().st_size / 1e6:.0f} MB")
+
+    print(f"  Reading buildings clipped to CMAP bbox …")
+    gdf = gpd.read_file(f"zip://{zip_path}", bbox=bbox)
+    gdf = gdf.set_crs("EPSG:4326", allow_override=True)
+    return gdf
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -222,7 +259,13 @@ def parse_args() -> argparse.Namespace:
         "--chunk-size",
         type=int,
         default=2000,
-        help="Features per page when querying services (default: 2000)",
+        help="Features per page when querying CMAP service (default: 2000)",
+    )
+    p.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=Path("cache"),
+        help="Directory to cache the Microsoft IL building footprints zip (default: ./cache/)",
     )
     p.add_argument(
         "--cmap-layer",
@@ -271,58 +314,20 @@ def main() -> None:
     # Reproject to working CRS for accurate spatial operations
     cmap_proj = cmap_gdf.to_crs(WORK_CRS)
 
-    # ── Step 3: Build bbox envelope for building pre-filter ──────────────────
+    # ── Step 3: Build bbox from CMAP extent ──────────────────────────────────
     print("\nStep 3: Building bounding-box filter from CMAP extent …")
     xmin, ymin, xmax, ymax = cmap_gdf.total_bounds  # WGS84
     print(f"  Extent (WGS84): xmin={xmin:.4f} ymin={ymin:.4f} xmax={xmax:.4f} ymax={ymax:.4f}")
 
-    geom_envelope = json.dumps({
-        "xmin": xmin,
-        "ymin": ymin,
-        "xmax": xmax,
-        "ymax": ymax,
-        "spatialReference": {"wkid": 4326},
-    })
-    geom_filter = {
-        "geometry": geom_envelope,
-        "geometryType": "esriGeometryEnvelope",
-        "spatialRel": "esriSpatialRelIntersects",
-        "inSR": "4326",
-    }
-
-    # ── Step 4: Fetch building footprints within CMAP bbox ───────────────────
-    print("\nStep 4: Fetching IL DNR building footprints within CMAP extent …")
-    print("  (Querying ~7 counties – this will take several minutes)")
-
-    bldg_meta = layer_meta(BLDG_BASE)
-    oid_field = bldg_meta.get("objectIdField", "OBJECTID")
-
-    # Count buildings in bbox first
-    count_data = _get(
-        BLDG_BASE + "/query",
-        {
-            "where": "1=1",
-            **geom_filter,
-            "returnCountOnly": "true",
-            "f": "json",
-        },
-        timeout=120,
+    # ── Step 4: Download Microsoft building footprints ────────────────────────
+    print("\nStep 4: Loading Microsoft USBuildingFootprints for Illinois …")
+    bldg_gdf = fetch_msft_buildings(
+        bbox=(xmin, ymin, xmax, ymax),
+        cache_dir=args.cache_dir,
     )
-    total_bldgs = count_data.get("count", 0)
-    print(f"  Buildings in CMAP bounding box: {total_bldgs:,}")
-
-    if total_bldgs == 0:
-        print("ERROR: No building footprints found in CMAP extent. Check connectivity.")
+    if bldg_gdf.empty:
+        print("ERROR: No building footprints found in CMAP extent.")
         sys.exit(1)
-
-    bldg_gdf = fetch_all_features(
-        BLDG_BASE,
-        where="1=1",
-        out_fields=f"{oid_field},COUNTY",
-        out_sr=4326,
-        geometry_filter=geom_filter,
-        page_size=min(args.chunk_size, bldg_meta.get("maxRecordCount", 1000)),
-    )
     print(f"  Loaded {len(bldg_gdf):,} buildings in CMAP bounding box.")
 
     # ── Step 5: Precise spatial join ─────────────────────────────────────────
@@ -339,10 +344,8 @@ def main() -> None:
     )
 
     # Drop duplicate buildings (a building may touch >1 CMAP polygon)
-    dup_key = oid_field if oid_field in joined.columns else None
-    if dup_key:
-        joined = joined.drop_duplicates(subset=[dup_key])
     joined = joined.drop(columns=["index_right"], errors="ignore")
+    joined = joined[~joined.index.duplicated(keep="first")]
 
     print(f"  Residential buildings (after dedup): {len(joined):,}")
 
